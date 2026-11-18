@@ -49,6 +49,11 @@ runs:
         docker buildx rm groundbox >/dev/null 2>&1 || true
         use=()
         [[ $GBX_USE == true ]] && use=(--use)
-        docker buildx create --name groundbox --driver remote "${use[@]}" "unix://$sock"
+        # Groundbox runners keep a buildkitd.default.toml (their registry mirror) that buildx refuses for a remote builder: set it aside while creating.
+        conf="${BUILDX_CONFIG:-$HOME/.docker/buildx}/buildkitd.default.toml"
+        [[ -e $conf ]] && mv "$conf" "$conf.gbx-aside"
+        docker buildx create --name groundbox --driver remote "${use[@]}" "unix://$sock"; rc=$?
+        [[ -e $conf.gbx-aside ]] && mv "$conf.gbx-aside" "$conf"
+        (( rc == 0 )) || exit $rc
         docker buildx inspect groundbox
         echo "name=groundbox" >>"$GITHUB_OUTPUT"
