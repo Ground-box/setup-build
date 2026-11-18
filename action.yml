@@ -1,0 +1,54 @@
+name: Groundbox remote Docker builds
+description: Build Docker images on a Groundbox builder (BuildKit with a layer cache per project). docker/build-push-action works unchanged.
+author: Groundbox
+branding:
+  icon: package
+  color: green
+inputs:
+  api-key:
+    description: A Groundbox API key with the builds:write scope. Keep it in a secret.
+    required: true
+  project:
+    description: Names the layer cache. Builds of one project share it.
+    default: ${{ github.repository }}
+  api-url:
+    description: The Groundbox API.
+    default: https://api.groundbox.dev/v1
+  use:
+    description: Make the groundbox builder the default for later steps.
+    default: "true"
+outputs:
+  name:
+    description: The buildx builder's name, for build-push-action's `builder` input.
+    value: ${{ steps.builder.outputs.name }}
+runs:
+  using: composite
+  steps:
+    - id: builder
+      shell: bash
+      env:
+        GROUNDBOX_API_KEY: ${{ inputs.api-key }}
+        GROUNDBOX_API_URL: ${{ inputs.api-url }}
+        GBX_PROJECT: ${{ inputs.project }}
+        GBX_USE: ${{ inputs.use }}
+      run: |
+        set -euo pipefail
+        sock="${RUNNER_TEMP:-/tmp}/groundbox-buildkit.sock"
+        log="${RUNNER_TEMP:-/tmp}/groundbox-buildkit.log"
+        # The builder starts while the proxy does: the first build finds it ready.
+        code=$(curl -sS -o "${RUNNER_TEMP:-/tmp}/groundbox-builder.json" -w '%{http_code}' -X POST "$GROUNDBOX_API_URL/builders" \
+          -H "Authorization: Bearer $GROUNDBOX_API_KEY" -H 'Content-Type: application/json' \
+          --data "$(jq -cn --arg p "$GBX_PROJECT" '{project: $p}')" --max-time 240) || code=000
+        if [[ $code != 200 ]]; then
+          echo "::error::Groundbox could not start the builder ($code): $(cat "${RUNNER_TEMP:-/tmp}/groundbox-builder.json" 2>/dev/null)"
+          exit 1
+        fi
+        nohup node "$GITHUB_ACTION_PATH/dist/proxy.mjs" --project "$GBX_PROJECT" --socket "$sock" >"$log" 2>&1 &
+        for _ in $(seq 1 100); do [[ -S $sock ]] && break; sleep 0.1; done
+        [[ -S $sock ]] || { cat "$log"; echo "::error::The Groundbox proxy did not start"; exit 1; }
+        docker buildx rm groundbox >/dev/null 2>&1 || true
+        use=()
+        [[ $GBX_USE == true ]] && use=(--use)
+        docker buildx create --name groundbox --driver remote "${use[@]}" "unix://$sock"
+        docker buildx inspect groundbox
+        echo "name=groundbox" >>"$GITHUB_OUTPUT"
